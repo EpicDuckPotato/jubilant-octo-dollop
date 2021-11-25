@@ -1,4 +1,5 @@
 from dircol_problem import DircolProblem
+from ellipsoid_dircol_problem import EllipsoidDircolProblem
 import numpy as np
 from scipy.linalg import solve_continuous_are, expm
 from scipy.integrate import solve_ivp
@@ -47,7 +48,7 @@ class Pdot(object):
 
   def __call__(self, t, P):
     P = P.reshape(self.nx, self.nx)
-    Pdot = self.A@P + P@A.transpose() + B@np.linalg.solve(R, B.transpose())
+    Pdot = self.A@P + P@self.A.transpose() + self.B@np.linalg.solve(self.R, self.B.transpose())
     return Pdot.flatten()
 
 class rdot(object):
@@ -57,7 +58,7 @@ class rdot(object):
     self.nx = A.shape[0]
 
   def __call__(self, t, r):
-    return A@r + c
+    return self.A@r + self.c
 
 class NSdot(object):
   def __init__(self, ts, xs, us, Q, R, dynamics_deriv):
@@ -281,8 +282,8 @@ class LQRTree(object):
         J = S[:2, :2]
         L = S[2:, :2]
         K = S[2:, 2:]
-        #Sp = J - L.transpose()@np.linalg.solve(K, L)
-        Sp = K - L@np.linalg.solve(J, L.transpose()) # Plot in velocity space
+        Sp = J - L.transpose()@np.linalg.solve(K, L)
+        #Sp = K - L@np.linalg.solve(J, L.transpose()) # Plot in velocity space
 
         theta = np.linspace(0, 2*np.pi, 100)
         points = np.sqrt(rho)*np.stack((np.cos(theta), np.sin(theta)), 0)
@@ -301,8 +302,8 @@ class LQRTree(object):
       J = S[:2, :2]
       L = S[2:, :2]
       K = S[2:, 2:]
-      #Sp = J - L.transpose()@np.linalg.solve(K, L)
-      Sp = K - L@np.linalg.solve(J, L.transpose()) # Plot in velocity space
+      Sp = J - L.transpose()@np.linalg.solve(K, L)
+      #Sp = K - L@np.linalg.solve(J, L.transpose()) # Plot in velocity space
       
       rho = self.nodes[0].policy.rho
 
@@ -410,6 +411,8 @@ class LQRTree(object):
     return rho
 
   def nearest_neighbor(self, x, R):
+    '''
+    # Euclidean distance version
     min_idx = 0
     min_dist = np.inf
     for n, node in enumerate(self.nodes):
@@ -420,28 +423,33 @@ class LQRTree(object):
         min_dist = dist
 
     return self.nodes[min_idx]
-
-    # TODO: finish this
     '''
-    u0 = np.zeros(self.nu)
 
-    for node in self.nodes:
-      # Run affine quadratic regulator to start at point in tree x0 and get to sample point x
-      # (yes, we are going backward in time)
+    uf = np.zeros(self.nu)
+    minJ = np.inf
+    min_idx = 0
+    for n, node in enumerate(self.nodes):
+      # Affine quadratic regulator to get from this node to x. Linearize about x (I guess that makes sense, since it's the goal
+      x0 = node.policy.get_x0(0)
 
-      A, B = self.dynamics_deriv(x, u0)
-      c = self.dynamics(x, u0)
+      A, B = self.dynamics_deriv(x, uf)
+      c = self.dynamics(x, uf)
 
-      ts = [self.dt*i for i in range(self.branch_horizon)]
+      ts = [self.dt*i for i in range(self.branch_horizon + 1)]
+      tf = ts[-1]
       pdot = Pdot(A, B, R)
-      ret = solve_ivp(Pdot(A, B, R), (ts[0], ts[-1]), np.zeros((self.nx, self.nx)), t_eval=ts)
-      Ps = ret.y.transpose().reshape(-1, nx, nx)
+      ret = solve_ivp(Pdot(A, B, R), (ts[0], ts[-1]), np.zeros((self.nx, self.nx)).flatten(), t_eval=ts)
+      Ps = ret.y.transpose().reshape(-1, self.nx, self.nx)
       ret = solve_ivp(rdot(A, c), (ts[0], ts[-1]), np.zeros(self.nx), t_eval=ts)
       rs = ret.y.transpose()
-      exps = [expm(A*t) for t in ts]
-      us = [-np.linalg.solve(R, B.transpose()
-      ds = [r + expm(At)*
-    '''
+      d = rs[-1] + expm(A*tf)@(x0 - x)
+      J = tf + 0.5*np.dot(d, np.linalg.solve(Ps[-1], d)) # TODO: optimize the time
+      if J < minJ:
+        minJ = J
+        min_idx = n
+
+    return self.nodes[min_idx]
+
 
   def build_tree(self):
     # Infinite-horizon LQR at the goal
@@ -491,10 +499,12 @@ class LQRTree(object):
       xsample = np.array([2.41427662, 5.14199858, 0.32134842, -0.0779939]) # TODO: go back to random sampling
       nearest_node = self.nearest_neighbor(xsample, R)
       xnear = nearest_node.policy.get_x0(0)
+      Snext = nearest_node.policy.get_S(0)
+      rhonext = nearest_node.policy.get_rho(0)
 
-      # Run direct collocation from the new node to the found node. TODO: enforce terminal set constraint instead of terminal state constraint. Ellipse containment
-      # should be easy to check, and the maximum rho such that the ellipse is contained in the next funnel is where we start our line search
+      # Run direct collocation from the new node to the found node. TODO: figure out why ellipsoid version doesn't work
       problem = DircolProblem(Q, R, self.branch_horizon, self.dt, self.dynamics, self.dynamics_deriv, self.nx, self.nu, xsample, xnear, self.ulb, self.uub)
+      #problem = EllipsoidDircolProblem(Q, R, self.branch_horizon, self.dt, self.dynamics, self.dynamics_deriv, self.nx, self.nu, xsample, xnear, self.ulb, self.uub, Snext, rhonext)
       xs, us, solved = problem.solve()
       if not solved:
         continue
@@ -513,8 +523,6 @@ class LQRTree(object):
 
       gamma = 0.5
       max_line_search_iter = 10
-      rhonext = nearest_node.policy.get_rho(0)
-      Snext = nearest_node.policy.get_S(0)
       x0next = nearest_node.policy.get_x0(0)
       found = False
       for iteration in range(max_line_search_iter):
@@ -528,14 +536,13 @@ class LQRTree(object):
         print('Could not contain the exit of this funnel in the entry of the next funnel')
         quit()
 
+      # TODO: figure out why rho check isn't working
       print(xsample)
       #rho = 0.0625
       rho = 0.0625/2
 
       # Run SOS optimization to get the funnel size at each time step
       rhos = [rho]
-      rhonext = rho
-      tnext = ts[-1]
       for rstep, t in enumerate(reversed(ts[:-1])):
         step = len(ts) - 2 - rstep
         tnext = ts[step + 1]
