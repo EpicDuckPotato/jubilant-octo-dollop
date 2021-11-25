@@ -131,18 +131,18 @@ class DircolProblem(object):
       A1, B1 = self.dynamics_deriv(x1, u1)
       Acol, Bcol = self.dynamics_deriv(xcol, ucol)
 
-      dxcol_dx0 = 0.5*np.eye(4) + self.dt/8*(A0)
-      dxcol_dx1 = 0.5*np.eye(4) + self.dt/8*(-A1)
+      dxcol_dx0 = 0.5*np.eye(self.nx) + self.dt/8*(A0)
+      dxcol_dx1 = 0.5*np.eye(self.nx) + self.dt/8*(-A1)
 
       dxcol_du0 = self.dt/8*B0
       dxcol_du1 = self.dt/8*(-B1)
 
-      dc_dx0 = np.eye(4) + self.dt/6*(A0 + 4*Acol@dxcol_dx0)
-      dc_dx1 = -np.eye(4) + self.dt/6*(4*Acol@dxcol_dx1 + A1)
+      dc_dx0 = np.eye(self.nx) + self.dt/6*(A0 + 4*Acol@dxcol_dx0)
+      dc_dx1 = -np.eye(self.nx) + self.dt/6*(4*Acol@dxcol_dx1 + A1)
       dc_du0 = self.dt/6*(B0 + 4*(Acol@dxcol_du0 + Bcol*0.5))
       dc_du1 = self.dt/6*(4*(Acol@dxcol_du1 + Bcol*0.5) + B1)
 
-      for row in range(4):
+      for row in range(self.nx):
         vals = np.append(vals, dc_dx0[row], 0)
         vals = np.append(vals, dc_du0[row], 0)
         vals = np.append(vals, dc_dx1[row], 0)

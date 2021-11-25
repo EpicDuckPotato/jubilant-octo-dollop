@@ -375,7 +375,7 @@ class LQRTree(object):
       Sdot = policy.get_Sdot(t)
 
     for i in range(self.nx):
-      xerrdot[i] = TaylorExpand(xerrdot[i], {var: 0 for var in xerr}, 3) # TVLQR doesn't even work with Taylor expansion 1, which means something's wrong
+      xerrdot[i] = TaylorExpand(xerrdot[i], {var: 0 for var in xerr}, 3) 
 
     V = np.dot(xerr, S@xerr)
     Vdot = 2*np.dot(xerr, S@xerrdot) + np.dot(xerr, Sdot@xerr)
@@ -496,7 +496,7 @@ class LQRTree(object):
         quit()
 
       # Find closest node in tree to this new node using the affine quadratic regulator
-      xsample = np.array([2.41427662, 5.14199858, 0.32134842, -0.0779939]) # TODO: go back to random sampling
+      #xsample = np.array([2.41427662, 5.14199858, 0.32134842, -0.0779939]) # TODO: go back to random sampling
       nearest_node = self.nearest_neighbor(xsample, R)
       xnear = nearest_node.policy.get_x0(0)
       Snext = nearest_node.policy.get_S(0)
