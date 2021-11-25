@@ -385,11 +385,22 @@ class LQRTree(object):
     else:
       la = prog.NewFreePolynomial(Variables(xerr), 2).ToExpression()
 
-    # Backtracking line search. TODO: make binary
-    rho = 1
-    gamma = 0.5
-    max_line_search_iter = 10
-    for iteration in range(max_line_search_iter):
+    # Line search
+    best_rho = 0
+    if rhonext is None:
+      rho = 25
+    else:
+      rho = rhonext*2
+
+    prev_rho = rho*2
+
+    max_improve = 10
+    rho_min = 1e-3
+    i = 0
+    while rho > rho_min:
+      if i > max_improve and best_rho != 0:
+        break
+
       if terminal:
         rhodot = 0
       else:
@@ -400,13 +411,20 @@ class LQRTree(object):
       result = Solve(prog_clone)
 
       if result.is_success():
-        break
+        best_rho = rho
+        rho = (rho + prev_rho)/2
+        prev_rho = best_rho
       else:
-        if iteration == max_line_search_iter - 1:
-          print('No region of attraction')
-          quit()
+        prev_rho = rho
+        rho = (rho + best_rho)/2
 
-        rho *= gamma
+      i += 1
+
+    if best_rho == 0:
+      print('No region of attraction')
+      quit()
+
+    rho = best_rho
 
     return rho
 
@@ -517,29 +535,37 @@ class LQRTree(object):
 
       # For the exit of this funnel, we have to find a rho such that the exit of this funnel
       # is contained in the entry of the next funnel. Do backtracking line search
-      rho = 1
+      best_rho = 0
+      rho = rhonext*2
+      prev_rho = rho*2
+      rho_min = 1e-3
       x0 = xs[-1]
       S = Ss[-1]
 
-      gamma = 0.5
-      max_line_search_iter = 10
+      max_improve = 10
       x0next = nearest_node.policy.get_x0(0)
-      found = False
-      for iteration in range(max_line_search_iter):
-        if check_ellipse_containment(S, Snext, x0, x0next, rho, rhonext):
-          found = True
-          print(rho)
+      i = 0
+      while rho > rho_min:
+        if i > max_improve and best_rho != 0:
           break
-        rho *= gamma
 
-      if not found:
+        if check_ellipse_containment(S, Snext, x0, x0next, rho, rhonext):
+          best_rho = rho
+          rho = (prev_rho + rho)/2
+          prev_rho = best_rho
+        else:
+          prev_rho = rho
+          rho = (rho + best_rho)/2
+
+        i += 1
+
+      if best_rho == 0:
         print('Could not contain the exit of this funnel in the entry of the next funnel')
         quit()
 
-      # TODO: figure out why rho check isn't working
+      rho = best_rho
+
       print(xsample)
-      #rho = 0.0625
-      rho = 0.0625/2
 
       # Run SOS optimization to get the funnel size at each time step
       rhos = [rho]
