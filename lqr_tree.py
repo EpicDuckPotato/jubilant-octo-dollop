@@ -142,7 +142,7 @@ class LQRPolicy(object):
       return False
 
     diff = x - self.x0
-    return np.dot(diff, self.S@diff) <= self.rho
+    return np.dot(diff, self.S@diff) <= self.rho, 0
     
   def get_u(self, x, t):
     return self.u0 - self.K@(x - self.x0)
@@ -205,8 +205,13 @@ class TVLQRPolicy(object):
       print('Querying region of attraction without setting it first')
       return False
 
-    diff = x - self.xs[0]
-    return np.dot(diff, self.Ss[0]@diff) <= self.rhos[0]
+    # Check roa of all funnels
+    for t, S, rho, x0 in zip(self.ts, self.Ss, self.rhos, self.xs):
+      diff = x - x0
+      if np.dot(diff, S@diff) <= rho:
+        return True, t
+
+    return False, 0
 
   def get_u(self, x, t):
     K = self.get_item(self.Ks, t)
@@ -226,9 +231,10 @@ def integrate(x, u, dynamics, dt):
   return x + (dt/6)*(k1 + 2*k2 + 2*k3 + k4)
 
 class Node(object):
-  def __init__(self, policy, parent):
+  def __init__(self, policy, parent, parent_t):
     self.policy = policy
     self.parent = parent
+    self.parent_t = parent_t
 
 class LQRTree(object):
   def __init__(self, xmax, symbolic_dynamics, dynamics, dynamics_deriv, nx, nu, xgoal, ugoal, ulb, uub, dt, branch_horizon):
@@ -247,86 +253,21 @@ class LQRTree(object):
 
     self.nodes = []
 
-  # Projects ellipsoid onto first two state components
-  def plot_funnel(self, node):
-    if node.policy.infinite_horizon():
-      S = node.policy.S
-
-      # Project S using Schur complement
-      J = S[:2, :2]
-      L = S[2:, :2]
-      K = S[2:, 2:]
-      Sp = J - L.transpose()@np.linalg.solve(K, L)
-      #Sp = K - L@np.linalg.solve(J, L.transpose()) # Plot in velocity space
-      
-      rho = node.policy.rho
-
-      theta = np.linspace(0, 2*np.pi, 100)
-      points = np.sqrt(rho)*np.stack((np.cos(theta), np.sin(theta)), 0)
-      L = np.linalg.cholesky(Sp)
-      points = np.linalg.solve(L.transpose(), points)
-
-      x0 = node.policy.get_x0(0)
-      
-      for i in range(2):
-        points[i] += x0[i]
-      plt.figure()
-      plt.plot(points[0], points[1])
-      plt.show()
-    else:
-      plt.figure()
-      num_funnels = len(node.policy.ts)
-      colors = [[0, f/(num_funnels - 1), 1 - f/(num_funnels - 1)] for f in range(num_funnels)]
-      for f, t, S, rho in zip(range(num_funnels), node.policy.ts, node.policy.Ss, node.policy.rhos):
-        # Project S using Schur complement
-        J = S[:2, :2]
-        L = S[2:, :2]
-        K = S[2:, 2:]
-        Sp = J - L.transpose()@np.linalg.solve(K, L)
-        #Sp = K - L@np.linalg.solve(J, L.transpose()) # Plot in velocity space
-
-        theta = np.linspace(0, 2*np.pi, 100)
-        points = np.sqrt(rho)*np.stack((np.cos(theta), np.sin(theta)), 0)
-        L = np.linalg.cholesky(Sp)
-        points = np.linalg.solve(L.transpose(), points)
-
-        x0 = node.policy.get_x0(t)
-
-        for i in range(2):
-          points[i] += x0[i]
-        plt.plot(points[0], points[1], color=colors[f])
-
-      S = self.nodes[0].policy.S
-
-      # Project S using Schur complement
-      J = S[:2, :2]
-      L = S[2:, :2]
-      K = S[2:, 2:]
-      Sp = J - L.transpose()@np.linalg.solve(K, L)
-      #Sp = K - L@np.linalg.solve(J, L.transpose()) # Plot in velocity space
-      
-      rho = self.nodes[0].policy.rho
-
-      theta = np.linspace(0, 2*np.pi, 100)
-      points = np.sqrt(rho)*np.stack((np.cos(theta), np.sin(theta)), 0)
-      L = np.linalg.cholesky(Sp)
-      points = np.linalg.solve(L.transpose(), points)
-
-      x0 = self.nodes[0].policy.get_x0(0)
-      
-      for i in range(2):
-        points[i] += x0[i]
-      plt.plot(points[0], points[1], color='r')
-
-      plt.show()
-
   def trace(self, xinit):
     xs = []
     us = []
+
+    # For funnel plotting. Each policy gets a list within each list
+    Slists = []
+    rholists = []
+    x0lists = []
+
     x = np.copy(xinit)
     node = None
+    t = 0
     for n in self.nodes:
-      if n.policy.in_roa(x):
+      in_roa, t = n.policy.in_roa(x)
+      if in_roa:
         node = n
         break
     
@@ -335,9 +276,15 @@ class LQRTree(object):
       quit()
   
     while node is not None:
+      Slists.append([])
+      rholists.append([])
+      x0lists.append([])
       if node.parent is None:
         # LTI
         x0 = node.policy.get_x0(0)
+        Slists[-1].append(node.policy.get_S(0))
+        rholists[-1].append(node.policy.get_rho(0))
+        x0lists[-1].append(x0)
         while np.linalg.norm(x - x0) > 0.01:
           u = node.policy.get_u(x, 0)
           xs.append(x)
@@ -345,15 +292,78 @@ class LQRTree(object):
           x = integrate(x, u, self.dynamics, self.dt)
       else:
         # LTV
-        for step, t in enumerate(node.policy.ts):
+        while t < node.policy.ts[-1]:
+          Slists[-1].append(node.policy.get_S(t))
+          rholists[-1].append(node.policy.get_rho(t))
+          x0lists[-1].append(node.policy.get_x0(t))
+
           u = node.policy.get_u(x, t)
           xs.append(x)
           us.append(u)
           x = integrate(x, u, self.dynamics, self.dt)
+          t += self.dt
 
+      t = node.parent_t
       node = node.parent
 
+    # Plotting
+    plt.figure()
+    plt.plot([x[0] for x in xs], [x[1] for x in xs], color='r')
+
+    num_funnels = len(Slists)
+    colors = [[0, f/(num_funnels - 1), 1 - f/(num_funnels - 1)] for f in range(num_funnels)]
+    for color, Ss, rhos, x0s in zip(colors, Slists, rholists, x0lists):
+      for S, rho, x0 in zip(Ss, rhos, x0s):
+        # Project S to 2D using Schur complement
+        J = S[:2, :2]
+        L = S[2:, :2]
+        K = S[2:, 2:]
+        Sp = J - L.transpose()@np.linalg.solve(K, L)
+
+        theta = np.linspace(0, 2*np.pi, 100)
+        points = np.sqrt(rho)*np.stack((np.cos(theta), np.sin(theta)), 0)
+        L = np.linalg.cholesky(Sp)
+        points = np.linalg.solve(L.transpose(), points)
+
+        for i in range(2):
+          points[i] += x0[i]
+        plt.plot(points[0], points[1], color=color)
+
+    plt.show()
+
     return xs, us
+
+  def plot_all_funnels(self):
+    plt.figure()
+    num_funnels = len(self.nodes)
+    colors = [[0, f/(num_funnels - 1), 1 - f/(num_funnels - 1)] for f in range(num_funnels)]
+    for color, node in zip(colors, self.nodes):
+      if node.policy.infinite_horizon():
+        Ss = [node.policy.S]
+        rhos = [node.policy.rho]
+        x0s = [node.policy.x0]
+      else:
+        Ss = node.policy.Ss
+        rhos = node.policy.rhos
+        x0s = node.policy.xs
+
+      for S, rho, x0 in zip(Ss, rhos, x0s):
+        # Project S to 2D using Schur complement
+        J = S[:2, :2]
+        L = S[2:, :2]
+        K = S[2:, 2:]
+        Sp = J - L.transpose()@np.linalg.solve(K, L)
+
+        theta = np.linspace(0, 2*np.pi, 100)
+        points = np.sqrt(rho)*np.stack((np.cos(theta), np.sin(theta)), 0)
+        L = np.linalg.cholesky(Sp)
+        points = np.linalg.solve(L.transpose(), points)
+
+        for i in range(2):
+          points[i] += x0[i]
+        plt.plot(points[0], points[1], color=color)
+
+    plt.show()
 
   def find_roa(self, policy, t, terminal, tnext=None, rhonext=None):
     prog = MathematicalProgram()
@@ -398,6 +408,7 @@ class LQRTree(object):
     rho_min = 1e-3
     i = 0
     while rho > rho_min:
+      print('ROA line search iteration ' + str(i))
       if i > max_improve and best_rho != 0:
         break
 
@@ -446,27 +457,35 @@ class LQRTree(object):
     uf = np.zeros(self.nu)
     minJ = np.inf
     min_idx = 0
+    min_t = 0
     for n, node in enumerate(self.nodes):
       # Affine quadratic regulator to get from this node to x. Linearize about x (I guess that makes sense, since it's the goal
-      x0 = node.policy.get_x0(0)
+      if node.policy.infinite_horizon():
+        policy_ts = [0]
+      else:
+        policy_ts = node.policy.ts[:-1]
 
-      A, B = self.dynamics_deriv(x, uf)
-      c = self.dynamics(x, uf)
+      for t in policy_ts:
+        x0 = node.policy.get_x0(t)
 
-      ts = [self.dt*i for i in range(self.branch_horizon + 1)]
-      tf = ts[-1]
-      pdot = Pdot(A, B, R)
-      ret = solve_ivp(Pdot(A, B, R), (ts[0], ts[-1]), np.zeros((self.nx, self.nx)).flatten(), t_eval=ts)
-      Ps = ret.y.transpose().reshape(-1, self.nx, self.nx)
-      ret = solve_ivp(rdot(A, c), (ts[0], ts[-1]), np.zeros(self.nx), t_eval=ts)
-      rs = ret.y.transpose()
-      d = rs[-1] + expm(A*tf)@(x0 - x)
-      J = tf + 0.5*np.dot(d, np.linalg.solve(Ps[-1], d)) # TODO: optimize the time
-      if J < minJ:
-        minJ = J
-        min_idx = n
+        A, B = self.dynamics_deriv(x, uf)
+        c = self.dynamics(x, uf)
 
-    return self.nodes[min_idx]
+        ts = [self.dt*i for i in range(self.branch_horizon + 1)]
+        tf = ts[-1]
+        pdot = Pdot(A, B, R)
+        ret = solve_ivp(Pdot(A, B, R), (ts[0], ts[-1]), np.zeros((self.nx, self.nx)).flatten(), t_eval=ts)
+        Ps = ret.y.transpose().reshape(-1, self.nx, self.nx)
+        ret = solve_ivp(rdot(A, c), (ts[0], ts[-1]), np.zeros(self.nx), t_eval=ts)
+        rs = ret.y.transpose()
+        d = rs[-1] + expm(A*tf)@(x0 - x)
+        J = tf + 0.5*np.dot(d, np.linalg.solve(Ps[-1], d)) # TODO: optimize the time
+        if J < minJ:
+          minJ = J
+          min_idx = n
+          min_t = t
+
+    return self.nodes[min_idx], min_t
 
 
   def build_tree(self):
@@ -477,7 +496,7 @@ class LQRTree(object):
     S = solve_continuous_are(A, B, Q, R)
     K = np.linalg.solve(R, B.transpose()@S)
 
-    self.nodes.append(Node(LQRPolicy(self.xgoal, self.ugoal, S, K), None))
+    self.nodes.append(Node(LQRPolicy(self.xgoal, self.ugoal, S, K), None, 0))
 
     # Find roa
     rho = self.find_roa(self.nodes[-1].policy, 0, True)
@@ -487,15 +506,11 @@ class LQRTree(object):
 
     self.nodes[-1].policy.set_rho(rho)
 
-    covered = False
     max_nodes = 200
     for n in range(max_nodes):
-      if covered:
-        break
-
       # Randomly sample points until we find one not in a funnel
       in_funnel = True
-      max_samples = 100
+      max_samples = 1000
       for sample in range(max_samples):
         # Randomly sample a point
         xsample = np.random.uniform(self.xgoal -self.xmax, self.xgoal + self.xmax)
@@ -503,26 +518,26 @@ class LQRTree(object):
         # Check if it's in a funnel already
         in_funnel = False
         for node in self.nodes:
-          if node.policy.in_roa(xsample):
+          in_roa, _ = node.policy.in_roa(xsample)
+          if in_roa:
             in_funnel = True
 
         if not in_funnel:
           break
 
       if in_funnel:
-        print('Sampled 100 points and they were all in funnels, but we think the space is not covered')
-        quit()
+        print('Space has been probabilistically covered')
+        return
 
       # Find closest node in tree to this new node using the affine quadratic regulator
-      #xsample = np.array([2.41427662, 5.14199858, 0.32134842, -0.0779939]) # TODO: go back to random sampling
-      nearest_node = self.nearest_neighbor(xsample, R)
-      xnear = nearest_node.policy.get_x0(0)
-      Snext = nearest_node.policy.get_S(0)
-      rhonext = nearest_node.policy.get_rho(0)
+      nearest_node, t = self.nearest_neighbor(xsample, R)
+      xnext = nearest_node.policy.get_x0(t)
+      Snext = nearest_node.policy.get_S(t)
+      rhonext = nearest_node.policy.get_rho(t)
 
       # Run direct collocation from the new node to the found node. TODO: figure out why ellipsoid version doesn't work
-      problem = DircolProblem(Q, R, self.branch_horizon, self.dt, self.dynamics, self.dynamics_deriv, self.nx, self.nu, xsample, xnear, self.ulb, self.uub)
-      #problem = EllipsoidDircolProblem(Q, R, self.branch_horizon, self.dt, self.dynamics, self.dynamics_deriv, self.nx, self.nu, xsample, xnear, self.ulb, self.uub, Snext, rhonext)
+      problem = DircolProblem(Q, R, self.branch_horizon, self.dt, self.dynamics, self.dynamics_deriv, self.nx, self.nu, xsample, xnext, self.ulb, self.uub)
+      #problem = EllipsoidDircolProblem(Q, R, self.branch_horizon, self.dt, self.dynamics, self.dynamics_deriv, self.nx, self.nu, xsample, xnext, self.ulb, self.uub, Snext, rhonext)
       xs, us, solved = problem.solve()
       if not solved:
         continue
@@ -531,7 +546,7 @@ class LQRTree(object):
       ts = [step*self.dt for step in range(self.branch_horizon + 1)]
       Ss, Ks, Sdots = tvlqr(xs, us, ts, self.dynamics_deriv, Q, R)
 
-      self.nodes.append(Node(TVLQRPolicy(xs, us, ts, Ss, Ks, Sdots), nearest_node))
+      self.nodes.append(Node(TVLQRPolicy(xs, us, ts, Ss, Ks, Sdots), nearest_node, t))
 
       # For the exit of this funnel, we have to find a rho such that the exit of this funnel
       # is contained in the entry of the next funnel. Do backtracking line search
@@ -543,9 +558,10 @@ class LQRTree(object):
       S = Ss[-1]
 
       max_improve = 10
-      x0next = nearest_node.policy.get_x0(0)
+      x0next = nearest_node.policy.get_x0(t)
       i = 0
       while rho > rho_min:
+        print('Connection line search iteration ' + str(i))
         if i > max_improve and best_rho != 0:
           break
 
@@ -565,8 +581,6 @@ class LQRTree(object):
 
       rho = best_rho
 
-      print(xsample)
-
       # Run SOS optimization to get the funnel size at each time step
       rhos = [rho]
       for rstep, t in enumerate(reversed(ts[:-1])):
@@ -578,6 +592,3 @@ class LQRTree(object):
 
       rhos = list(reversed(rhos))
       self.nodes[-1].policy.set_rhos(rhos)
-
-      # Update coverage (TODO, actually implement)
-      covered = True

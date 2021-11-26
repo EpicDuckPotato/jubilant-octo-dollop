@@ -15,19 +15,15 @@ dt = 0.1
 branch_horizon = 50
 tree = LQRTree(xmax, symbolic_dynamics, dynamics, linearize_dynamics, nx, nu, xgoal, ugoal, ulb, uub, dt, branch_horizon)
 tree.build_tree()
-tree.plot_funnel(tree.nodes[1])
+tree.plot_all_funnels()
 with open('tree.pkl', 'wb') as f:
   pickle.dump(tree, f)
 
-xs, us = tree.trace(np.array([1, -5]))
+xs, us = tree.trace(np.array([3.4, 12.6]))
 plt.figure()
 plt.plot([x[0] for x in xs])
 plt.figure()
 plt.plot([x[1] for x in xs])
-plt.figure()
-plt.plot([x[2] for x in xs])
-plt.figure()
-plt.plot([x[3] for x in xs])
 plt.figure()
 plt.plot(us)
 plt.show()
