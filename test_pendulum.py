@@ -19,7 +19,8 @@ tree.plot_all_funnels()
 with open('tree.pkl', 'wb') as f:
   pickle.dump(tree, f)
 
-xs, us = tree.trace(np.array([3.4, 12.6]))
+#xs, us = tree.trace(np.array([3.4, 12.6]))
+xs, us = tree.trace(np.array([3.4, 7]))
 plt.figure()
 plt.plot([x[0] for x in xs])
 plt.figure()

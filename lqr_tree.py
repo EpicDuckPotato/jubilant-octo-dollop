@@ -8,6 +8,7 @@ from pydrake.all import MathematicalProgram, Solve, Polynomial, Variables, Jacob
 from pydrake.symbolic import TaylorExpand, cos, sin
 import matplotlib.pyplot as plt
 import cvxpy as cp
+from multiprocessing import Process
 
 def check_ellipse_containment(S1, S2, c1, c2, rho1, rho2):
   nx = c1.shape[0]
@@ -311,7 +312,11 @@ class LQRTree(object):
     plt.plot([x[0] for x in xs], [x[1] for x in xs], color='r')
 
     num_funnels = len(Slists)
-    colors = [[0, f/(num_funnels - 1), 1 - f/(num_funnels - 1)] for f in range(num_funnels)]
+    if num_funnels > 1:
+      colors = [[0, f/(num_funnels - 1), 1 - f/(num_funnels - 1)] for f in range(num_funnels)]
+    else:
+      colors = [[0, 1, 0] for f in range(num_funnels)]
+
     for color, Ss, rhos, x0s in zip(colors, Slists, rholists, x0lists):
       for S, rho, x0 in zip(Ss, rhos, x0s):
         # Project S to 2D using Schur complement
@@ -396,20 +401,20 @@ class LQRTree(object):
       la = prog.NewFreePolynomial(Variables(xerr), 2).ToExpression()
 
     # Line search
-    best_rho = 0
+    lower = 0
     if rhonext is None:
       rho = 25
     else:
       rho = rhonext*2
 
-    prev_rho = rho*2
+    upper = rho*2
 
     max_improve = 10
     rho_min = 1e-3
     i = 0
     while rho > rho_min:
       print('ROA line search iteration ' + str(i))
-      if i > max_improve and best_rho != 0:
+      if i > max_improve and lower != 0:
         break
 
       if terminal:
@@ -419,23 +424,24 @@ class LQRTree(object):
 
       prog_clone = prog.Clone()
       prog_clone.AddSosConstraint(rhodot - Vdot - la*(rho - V))
+
       result = Solve(prog_clone)
 
       if result.is_success():
-        best_rho = rho
-        rho = (rho + prev_rho)/2
-        prev_rho = best_rho
+        lower = rho
+        rho = (rho + upper)/2
       else:
-        prev_rho = rho
-        rho = (rho + best_rho)/2
+        upper = rho
+        rho = (rho + lower)/2
 
       i += 1
 
-    if best_rho == 0:
+    if lower == 0:
       print('No region of attraction')
       quit()
 
-    rho = best_rho
+    rho = lower
+    print('Finished ROA line search with rho = ' + str(rho))
 
     return rho
 
@@ -550,10 +556,10 @@ class LQRTree(object):
 
       # For the exit of this funnel, we have to find a rho such that the exit of this funnel
       # is contained in the entry of the next funnel. Do backtracking line search
-      best_rho = 0
+      lower = 0
       rho = rhonext*2
-      prev_rho = rho*2
-      rho_min = 1e-3
+      upper = rho*2
+      rho_min = min(rhonext/10, 1e-3)
       x0 = xs[-1]
       S = Ss[-1]
 
@@ -562,24 +568,28 @@ class LQRTree(object):
       i = 0
       while rho > rho_min:
         print('Connection line search iteration ' + str(i))
-        if i > max_improve and best_rho != 0:
+        if i > max_improve and lower != 0:
           break
 
         if check_ellipse_containment(S, Snext, x0, x0next, rho, rhonext):
-          best_rho = rho
-          rho = (prev_rho + rho)/2
-          prev_rho = best_rho
+          lower = rho
+          rho = (upper + rho)/2
         else:
-          prev_rho = rho
-          rho = (rho + best_rho)/2
+          upper = rho
+          rho = (rho + lower)/2
 
         i += 1
 
-      if best_rho == 0:
+      print('Finished connection line search with rho = ' + str(rho))
+
+      if lower == 0:
         print('Could not contain the exit of this funnel in the entry of the next funnel')
+        print(rhonext)
+        print(Snext)
+        print(S)
         quit()
 
-      rho = best_rho
+      rho = lower
 
       # Run SOS optimization to get the funnel size at each time step
       rhos = [rho]
