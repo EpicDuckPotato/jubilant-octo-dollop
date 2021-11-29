@@ -55,6 +55,7 @@ class DircolProblem(object):
        cl=cl,
        cu=cu,
     )
+    nlp.addOption(b'print_level', 0)
 
     soln, info = nlp.solve(warm_start)
     if info['status'] != 0:
@@ -182,6 +183,7 @@ class DircolProblem(object):
                    d_norm, regularization_size, alpha_du, alpha_pr,
                    ls_trials):
     """Prints information at every Ipopt iteration."""
+    return 
 
     msg = "Objective value at iteration #{:d} is - {:g}"
 

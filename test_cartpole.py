@@ -15,9 +15,11 @@ dt = 0.1
 branch_horizon = 50
 tree = LQRTree(xmax, symbolic_dynamics, dynamics, linearize_dynamics, nx, nu, xgoal, ugoal, ulb, uub, dt, branch_horizon)
 tree.build_tree()
-tree.plot_all_funnels()
+xlabel = 'x'
+ylabel = 'theta'
+tree.plot_all_funnels(xlabel, ylabel, 'cartpole_trace.png')
 
-xs, us = tree.trace(np.array([1, 3.4, 0, 0]))
+xs, us = tree.trace(np.array([1, 3.4, 0, 0]), xlabel, ylabel, 'cartpole_trace.png')
 plt.figure()
 plt.plot([x[0] for x in xs])
 plt.figure()

@@ -9,6 +9,8 @@ from pydrake.symbolic import TaylorExpand, cos, sin
 import matplotlib.pyplot as plt
 import cvxpy as cp
 from multiprocessing import Process
+import sys
+import os
 
 def check_ellipse_containment(S1, S2, c1, c2, rho1, rho2):
   nx = c1.shape[0]
@@ -250,7 +252,7 @@ class LQRTree(object):
 
     self.nodes = []
 
-  def trace(self, xinit):
+  def trace(self, xinit, xlabel, ylabel, fname):
     xs = []
     us = []
 
@@ -305,7 +307,7 @@ class LQRTree(object):
 
     # Plotting
     plt.figure()
-    plt.plot([x[0] for x in xs], [x[1] for x in xs], color='r')
+    plt.plot([x[0] for x in xs], [x[1] for x in xs], color='r', label='Trajectory')
 
     num_funnels = len(Slists)
     if num_funnels > 1:
@@ -330,14 +332,22 @@ class LQRTree(object):
           points[i] += x0[i]
         plt.plot(points[0], points[1], color=color)
 
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title('Funnel Trace Starting at ' + str(xinit))
+    plt.legend()
+    plt.savefig(fname)
     plt.show()
 
     return xs, us
 
-  def plot_all_funnels(self):
+  def plot_all_funnels(self, xlabel, ylabel, fname):
     plt.figure()
     num_funnels = len(self.nodes)
-    colors = [[0, f/(num_funnels - 1), 1 - f/(num_funnels - 1)] for f in range(num_funnels)]
+    if num_funnels > 1:
+      colors = [[0, 1 - f/(num_funnels - 1), f/(num_funnels - 1)] for f in range(num_funnels)]
+    else:
+      colors = [[0, 1, 0] for f in range(num_funnels)]
     for color, node in zip(colors, self.nodes):
       if node.policy.infinite_horizon():
         Ss = [node.policy.S]
@@ -364,6 +374,10 @@ class LQRTree(object):
           points[i] += x0[i]
         plt.plot(points[0], points[1], color=color)
 
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title('Funnel Library')
+    plt.savefig(fname)
     plt.show()
 
   def find_roa(self, policy, t, terminal, tnext=None, rhonext=None):
@@ -409,7 +423,7 @@ class LQRTree(object):
     rho_min = 1e-3
     i = 0
     while rho > rho_min:
-      print('ROA line search iteration ' + str(i))
+      print('ROA line search iteration %d, testing rho = %f' %(i, rho))
       if i > max_improve and lower != 0:
         break
 
@@ -437,25 +451,32 @@ class LQRTree(object):
       quit()
 
     rho = lower
-    print('Finished ROA line search with rho = ' + str(rho))
+    print('Finished ROA line search with rho = %f' %(rho))
 
     return rho
 
-  def nearest_neighbor(self, x, R):
-    '''
+  def nearest_neighbor_euclidean(self, x):
     # Euclidean distance version
-    min_idx = 0
     min_dist = np.inf
+    min_idx = 0
+    min_t = 0
     for n, node in enumerate(self.nodes):
-      x0 = node.policy.get_x0(0)
-      dist = np.linalg.norm(x - x0)
-      if dist < min_dist:
-        min_idx = n
-        min_dist = dist
+      if node.policy.infinite_horizon():
+        policy_ts = [0]
+      else:
+        policy_ts = node.policy.ts[:-1]
 
-    return self.nodes[min_idx]
-    '''
+      for t in policy_ts:
+        x0 = node.policy.get_x0(t)
+        dist = np.linalg.norm(x - x0)
+        if dist < min_dist:
+          min_dist = dist
+          min_idx = n
+          min_t = t
 
+    return self.nodes[min_idx], min_t
+
+  def nearest_neighbor_aqr(self, x, R):
     uf = np.zeros(self.nu)
     minJ = np.inf
     min_idx = 0
@@ -498,24 +519,26 @@ class LQRTree(object):
     S = solve_continuous_are(A, B, Q, R)
     K = np.linalg.solve(R, B.transpose()@S)
 
-    self.nodes.append(Node(LQRPolicy(self.xgoal, self.ugoal, S, K), None, 0))
+    lqr_policy = LQRPolicy(self.xgoal, self.ugoal, S, K)
 
     # Find roa
-    rho = self.find_roa(self.nodes[-1].policy, 0, True)
+    rho = self.find_roa(lqr_policy, 0, True)
     if rho == 0:
       print('Failed to verify terminal controller')
       quit()
 
-    self.nodes[-1].policy.set_rho(rho)
+    lqr_policy.set_rho(rho)
+    self.nodes.append(Node(lqr_policy, None, 0))
 
     max_nodes = 200
+    dircol_fails = 0
     for n in range(max_nodes):
       # Randomly sample points until we find one not in a funnel
       in_funnel = True
       max_samples = 1000
       for sample in range(max_samples):
         # Randomly sample a point
-        xsample = np.random.uniform(self.xgoal -self.xmax, self.xgoal + self.xmax)
+        xsample = np.random.uniform(self.xgoal - self.xmax, self.xgoal + self.xmax)
 
         # Check if it's in a funnel already
         in_funnel = False
@@ -528,11 +551,11 @@ class LQRTree(object):
           break
 
       if in_funnel:
-        print('Space has been probabilistically covered')
+        print('Space has been probabilistically covered wihth %d funnels. Direct collocation failed %d times' %(len(self.nodes), dircol_fails))
         return
 
       # Find closest node in tree to this new node using the affine quadratic regulator
-      nearest_node, t = self.nearest_neighbor(xsample, R)
+      nearest_node, t = self.nearest_neighbor_aqr(xsample, R)
       xnext = nearest_node.policy.get_x0(t)
       Snext = nearest_node.policy.get_S(t)
       rhonext = nearest_node.policy.get_rho(t)
@@ -542,13 +565,13 @@ class LQRTree(object):
       #problem = EllipsoidDircolProblem(Q, R, self.branch_horizon, self.dt, self.dynamics, self.dynamics_deriv, self.nx, self.nu, xsample, xnext, self.ulb, self.uub, Snext, rhonext)
       xs, us, solved = problem.solve()
       if not solved:
+        print('Direct collocation failed. %d funnels so far' %(len(self.nodes)))
+        dircol_fails += 1
         continue
 
       # Run TVLQR to stabilize the nominal trajectory
       ts = [step*self.dt for step in range(self.branch_horizon + 1)]
       Ss, Ks, Sdots = tvlqr(xs, us, ts, self.dynamics_deriv, Q, R)
-
-      self.nodes.append(Node(TVLQRPolicy(xs, us, ts, Ss, Ks, Sdots), nearest_node, t))
 
       # For the exit of this funnel, we have to find a rho such that the exit of this funnel
       # is contained in the entry of the next funnel. Do backtracking line search
@@ -563,7 +586,7 @@ class LQRTree(object):
       x0next = nearest_node.policy.get_x0(t)
       i = 0
       while rho > rho_min:
-        print('Connection line search iteration ' + str(i))
+        print('Connection line search iteration %d' %(i))
         if i > max_improve and lower != 0:
           break
 
@@ -576,14 +599,13 @@ class LQRTree(object):
 
         i += 1
 
-      print('Finished connection line search with rho = ' + str(rho))
+      print('Finished connection line search with rho = %f' %(rho))
 
       if lower == 0:
         print('Could not contain the exit of this funnel in the entry of the next funnel')
-        print(rhonext)
-        print(Snext)
-        print(S)
-        quit()
+        continue
+
+      lqr_policy = TVLQRPolicy(xs, us, ts, Ss, Ks, Sdots)
 
       rho = lower
 
@@ -593,8 +615,16 @@ class LQRTree(object):
         step = len(ts) - 2 - rstep
         tnext = ts[step + 1]
         rhonext = rhos[-1]
-        rho = self.find_roa(self.nodes[-1].policy, t, False, tnext, rhonext)
+        rho = self.find_roa(lqr_policy, t, False, tnext, rhonext)
+        if rho == 0:
+          break
         rhos.append(rho)
 
+      if rho == 0:
+        continue
+
       rhos = list(reversed(rhos))
-      self.nodes[-1].policy.set_rhos(rhos)
+      lqr_policy.set_rhos(rhos)
+      self.nodes.append(Node(lqr_policy, nearest_node, t))
+
+    print('Created %d funnels, but did not cover space. Direct collocation failed %d times' %(len(self.nodes), dircol_fails))

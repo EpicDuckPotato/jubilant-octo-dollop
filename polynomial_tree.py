@@ -353,7 +353,7 @@ class PolynomialTree(object):
 
     self.nodes = []
 
-  def trace(self, xinit):
+  def trace(self, xinit, xlabel, ylabel, fname):
     xs = []
     us = []
 
@@ -433,11 +433,15 @@ class PolynomialTree(object):
           points[i] += x0[i]
         plt.plot(points[0], points[1], color=color)
 
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title('Funnel Trace Starting at ' + str(xinit))
+    plt.savefig(fname)
     plt.show()
 
     return xs, us
 
-  def plot_all_funnels(self):
+  def plot_all_funnels(self, xlabel, ylabel, fname):
     plt.figure()
     num_funnels = len(self.nodes)
     colors = [[0, f/(num_funnels - 1), 1 - f/(num_funnels - 1)] for f in range(num_funnels)]
@@ -467,6 +471,7 @@ class PolynomialTree(object):
           points[i] += x0[i]
         plt.plot(points[0], points[1], color=color)
 
+    plt.savefig(fname)
     plt.show()
 
   def find_roa_and_controller(self, lqr_policy, t, terminal, tnext=None, rhonext=None):

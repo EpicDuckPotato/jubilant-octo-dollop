@@ -15,10 +15,12 @@ dt = 0.1
 branch_horizon = 50
 tree = PolynomialTree(xmax, symbolic_dynamics_u, dynamics, linearize_dynamics, nx, nu, xgoal, ugoal, ulb, uub, dt, branch_horizon)
 tree.build_tree()
-tree.plot_all_funnels()
+xlabel = 'theta'
+ylabel = 'theta_dot'
+tree.plot_all_funnels(xlabel, ylabel, 'pendulum_funnels.png')
 
 #xs, us = tree.trace(np.array([3.4, 12.6]))
-xs, us = tree.trace(np.array([4, 7]))
+xs, us = tree.trace(np.array([4, 7]), xlabel, ylabel, 'pendulum_trace.png')
 plt.figure()
 plt.plot([x[0] for x in xs])
 plt.figure()
