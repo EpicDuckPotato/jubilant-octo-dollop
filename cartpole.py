@@ -2,6 +2,17 @@ import numpy as np
 from pydrake.all import MathematicalProgram, Solve, Polynomial, Variables, Jacobian
 from pydrake.symbolic import TaylorExpand, cos, sin
 
+def symbolic_dynamics_u(state, t, u):
+  x = state[0]
+  th = state[1]
+  xdot = state[2]
+  thdot = state[3]
+  c = cos(th)
+  s = sin(th)
+  xddot = (u[0] + s*c + thdot**2*s)/(2 - c**2)
+  thddot = -xddot*c - s
+  return np.array([xdot, thdot, xddot, thddot])
+
 def symbolic_dynamics(state, t, policy):
   x = state[0]
   th = state[1]

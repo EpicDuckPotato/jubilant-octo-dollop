@@ -1,6 +1,6 @@
-from lqr_tree import LQRTree
+from polynomial_tree import PolynomialTree
 import numpy as np
-from cartpole import symbolic_dynamics, dynamics, linearize_dynamics
+from cartpole import symbolic_dynamics_u, dynamics, linearize_dynamics
 import pickle
 import matplotlib.pyplot as plt
 
@@ -13,7 +13,7 @@ ulb = -5
 uub = 5
 dt = 0.1
 branch_horizon = 50
-tree = LQRTree(xmax, symbolic_dynamics, dynamics, linearize_dynamics, nx, nu, xgoal, ugoal, ulb, uub, dt, branch_horizon)
+tree = PolynomialTree(xmax, symbolic_dynamics_u, dynamics, linearize_dynamics, nx, nu, xgoal, ugoal, ulb, uub, dt, branch_horizon)
 tree.build_tree()
 tree.plot_all_funnels()
 

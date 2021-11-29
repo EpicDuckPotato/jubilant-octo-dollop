@@ -5,7 +5,7 @@ from scipy.linalg import solve_continuous_are, expm
 from scipy.integrate import solve_ivp
 import bisect
 from pydrake.all import MathematicalProgram, Solve, Polynomial, Variables, Jacobian
-from pydrake.symbolic import TaylorExpand, cos, sin
+from pydrake.symbolic import TaylorExpand, cos, sin, Expression
 import matplotlib.pyplot as plt
 import cvxpy as cp
 from multiprocessing import Process
@@ -145,6 +145,42 @@ class LQRPolicy(object):
   def get_u(self, x, t):
     return self.u0 - self.K@(x - self.x0)
 
+class PolynomialPolicy(object):
+  def __init__(self, x0, u, V, rho, err_vars, S):
+    self.x0 = np.copy(x0)
+    self.u = u
+    self.V = V
+    self.rho = rho
+    self.err_vars = err_vars
+    self.S = np.copy(S)
+
+  def infinite_horizon(self):
+    return True
+
+  def get_x0(self, t):
+    return np.copy(self.x0)
+
+  def set_rho(self, rho):
+    self.rho = rho
+
+  def get_rho(self, t):
+    return self.rho
+
+  def get_S(self, t):
+    return np.copy(self.S)
+
+  def in_roa(self, x):
+    if self.rho is None:
+      print('Querying region of attraction without setting it first')
+      return False
+
+    diff = x - self.x0
+    return self.V.Substitute({v: d for v, d in zip(self.err_vars, diff)}).Evaluate() <= self.rho, 0
+    
+  def get_u(self, x, t):
+    diff = x - self.x0
+    return np.array([u.Substitute({v: d for v, d in zip(self.err_vars, diff)}).Evaluate() for u in self.u])
+
 class TVLQRPolicy(object):
   def __init__(self, xs, us, ts, Ss, Ks, Sdots):
     self.xs = [np.copy(x) for x in xs]
@@ -196,7 +232,7 @@ class TVLQRPolicy(object):
   def get_rho(self, t):
     return self.get_item(self.rhos, t)
 
-  # TODO: check if x is between ellipsoids
+  # Check if x is between ellipsoids
   def in_roa(self, x):
     if self.rhos is None:
       print('Querying region of attraction without setting it first')
@@ -216,6 +252,73 @@ class TVLQRPolicy(object):
     u0 = self.get_item(self.us, t)
     return u0 - K@(x - x0)
 
+class TVPolynomialPolicy(object):
+  def __init__(self, xs, us, ts, Vs, rhos, errs, Ss, Sdots):
+    self.xs = [np.copy(x) for x in xs]
+    self.us = us
+    self.ts = [t for t in ts]
+    self.Vs = Vs
+    self.rhos = rhos
+    self.errs = errs
+    self.Ss = [np.copy(S) for S in Ss]
+    self.Sdots = [np.copy(Sdot) for Sdot in Sdots]
+
+  def infinite_horizon(self):
+    return False
+
+  def get_item(self, arr, t):
+    if t < self.ts[0]:
+      print('Time out of range')
+      quit()
+    elif t > self.ts[-1]:
+      print('Time out of range')
+      quit()
+
+    step = bisect.bisect_right(self.ts, t) - 1
+    if step == len(self.ts) - 1:
+      item = np.copy(arr[-1])
+    else:
+      alpha = (self.ts[step + 1] - t)/(self.ts[step + 1] - self.ts[step])
+      item = alpha*arr[step] + (1 - alpha)*arr[step + 1]
+
+    return item
+
+  def get_x0(self, t):
+    return self.get_item(self.xs, t)
+
+  def get_Sdot(self, t):
+    return self.get_item(self.Sdots, t)
+
+  def get_S(self, t):
+    return self.get_item(self.Ss, t)
+
+  def set_rhos(self, rhos):
+    self.rhos = [rho for rho in rhos]
+
+  def get_rho(self, t):
+    return self.get_item(self.rhos, t)
+
+  def in_roa(self, x):
+    if self.rhos is None:
+      print('Querying region of attraction without setting it first')
+      return False
+
+    # Check roa of all funnels
+    for t, V, rho, err_vars in zip(self.ts, self.Vs, self.rhos, self.errs):
+      if V is None:
+        continue
+      if V.Substitute({v: xi for v, xi in zip(err_vars, x)}).Evaluate() <= rho:
+        return True, t
+
+    return False, 0
+
+  def get_u(self, x, t):
+    diff = x - self.get_x0(t)
+    step = bisect.bisect_right(self.ts, t) - 1
+    u = self.us[step]
+    err_vars = self.errs[step]
+    return np.array([ui.Substitute({v: d for v, d in zip(err_vars, diff)}).Evaluate() for ui in u])
+
 def integrate(x, u, dynamics, dt):
   x1 = x
   k1 = dynamics(x1, u)
@@ -233,10 +336,10 @@ class Node(object):
     self.parent = parent
     self.parent_t = parent_t
 
-class LQRTree(object):
-  def __init__(self, xmax, symbolic_dynamics, dynamics, dynamics_deriv, nx, nu, xgoal, ugoal, ulb, uub, dt, branch_horizon):
+class PolynomialTree(object):
+  def __init__(self, xmax, symbolic_dynamics_u, dynamics, dynamics_deriv, nx, nu, xgoal, ugoal, ulb, uub, dt, branch_horizon):
     self.xmax = xmax
-    self.symbolic_dynamics = symbolic_dynamics
+    self.symbolic_dynamics_u = symbolic_dynamics_u
     self.dynamics = dynamics
     self.dynamics_deriv = dynamics_deriv
     self.nx = nx
@@ -366,24 +469,33 @@ class LQRTree(object):
 
     plt.show()
 
-  def find_roa(self, policy, t, terminal, tnext=None, rhonext=None):
+  def find_roa_and_controller(self, lqr_policy, t, terminal, tnext=None, rhonext=None):
     prog = MathematicalProgram()
     xerr = prog.NewIndeterminates(self.nx, 'xerr')
-    x0 = policy.get_x0(t)
-    u0 = policy.get_u0(t)
+    upolys = np.array([prog.NewFreePolynomial(Variables(xerr), 2) for i in range(self.nu)])
+    u = np.array([poly.ToExpression() for poly in upolys])
+
+    Smax = np.amax(np.abs(lqr_policy.get_S(t)))
+    for poly in upolys:
+      for v in poly.decision_variables():
+        vexpr = Expression(v)
+        prog.AddLinearConstraint(vexpr, -2*Smax, 2*Smax)
+
+    x0 = lqr_policy.get_x0(t)
+    u0 = lqr_policy.get_u0(t)
     if terminal:
       x0dot = np.zeros_like(x0)
     else:
       x0dot = self.dynamics(x0, u0)
 
-    xerrdot = self.symbolic_dynamics(xerr + x0, t, policy) - x0dot
+    xerrdot = self.symbolic_dynamics_u(xerr + x0, t, u) - x0dot
 
-    S = policy.get_S(t)
+    S = lqr_policy.get_S(t)
 
     if terminal:
       Sdot = np.zeros_like(S)
     else:
-      Sdot = policy.get_Sdot(t)
+      Sdot = lqr_policy.get_Sdot(t)
 
     for i in range(self.nx):
       xerrdot[i] = TaylorExpand(xerrdot[i], {var: 0 for var in xerr}, 3) 
@@ -408,6 +520,7 @@ class LQRTree(object):
     max_improve = 10
     rho_min = 1e-3
     i = 0
+    bestu = None
     while rho > rho_min:
       print('ROA line search iteration ' + str(i))
       if i > max_improve and lower != 0:
@@ -426,6 +539,7 @@ class LQRTree(object):
       if result.is_success():
         lower = rho
         rho = (rho + upper)/2
+        bestu = np.array([result.GetSolution(poly).ToExpression() for poly in upolys])
       else:
         upper = rho
         rho = (rho + lower)/2
@@ -439,7 +553,7 @@ class LQRTree(object):
     rho = lower
     print('Finished ROA line search with rho = ' + str(rho))
 
-    return rho
+    return rho, bestu, V, Variables(xerr)
 
   def nearest_neighbor(self, x, R):
     '''
@@ -498,15 +612,15 @@ class LQRTree(object):
     S = solve_continuous_are(A, B, Q, R)
     K = np.linalg.solve(R, B.transpose()@S)
 
-    self.nodes.append(Node(LQRPolicy(self.xgoal, self.ugoal, S, K), None, 0))
+    lqr_policy = LQRPolicy(self.xgoal, self.ugoal, S, K)
 
     # Find roa
-    rho = self.find_roa(self.nodes[-1].policy, 0, True)
+    rho, u, V, err_vars = self.find_roa_and_controller(lqr_policy, 0, True)
     if rho == 0:
       print('Failed to verify terminal controller')
       quit()
 
-    self.nodes[-1].policy.set_rho(rho)
+    self.nodes.append(Node(PolynomialPolicy(self.xgoal, u, V, rho, err_vars, S), None, 0))
 
     max_nodes = 200
     for n in range(max_nodes):
@@ -548,8 +662,6 @@ class LQRTree(object):
       ts = [step*self.dt for step in range(self.branch_horizon + 1)]
       Ss, Ks, Sdots = tvlqr(xs, us, ts, self.dynamics_deriv, Q, R)
 
-      self.nodes.append(Node(TVLQRPolicy(xs, us, ts, Ss, Ks, Sdots), nearest_node, t))
-
       # For the exit of this funnel, we have to find a rho such that the exit of this funnel
       # is contained in the entry of the next funnel. Do backtracking line search
       lower = 0
@@ -587,14 +699,25 @@ class LQRTree(object):
 
       rho = lower
 
+      lqr_policy = TVLQRPolicy(xs, us, ts, Ss, Ks, Sdots) 
+
       # Run SOS optimization to get the funnel size at each time step
       rhos = [rho]
+      us = [None]
+      Vs = [None]
+      errs = [None]
       for rstep, t in enumerate(reversed(ts[:-1])):
         step = len(ts) - 2 - rstep
         tnext = ts[step + 1]
         rhonext = rhos[-1]
-        rho = self.find_roa(self.nodes[-1].policy, t, False, tnext, rhonext)
+        rho, u, V, err_vars = self.find_roa_and_controller(lqr_policy, t, False, tnext, rhonext)
         rhos.append(rho)
+        us.append(u)
+        Vs.append(V)
+        errs.append(err_vars)
 
       rhos = list(reversed(rhos))
-      self.nodes[-1].policy.set_rhos(rhos)
+      us = list(reversed(us))
+      Vs = list(reversed(Vs))
+      errs = list(reversed(errs))
+      self.nodes.append(Node(TVPolynomialPolicy(xs, us, ts, Vs, rhos, errs, Ss, Sdots), nearest_node, t))
