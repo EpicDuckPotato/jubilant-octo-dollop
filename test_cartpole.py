@@ -17,7 +17,7 @@ tree = LQRTree(xmax, symbolic_dynamics, dynamics, linearize_dynamics, nx, nu, xg
 tree.build_tree()
 xlabel = 'x'
 ylabel = 'theta'
-tree.plot_all_funnels(xlabel, ylabel, 'cartpole_trace.png')
+tree.plot_all_funnels(xlabel, ylabel, 'cartpole_funnels.png')
 
 xs, us = tree.trace(np.array([1, 3.4, 0, 0]), xlabel, ylabel, 'cartpole_trace.png')
 plt.figure()
