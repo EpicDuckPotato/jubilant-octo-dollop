@@ -31,7 +31,7 @@ def check_ellipse_containment(S1, S2, c1, c2, rho1, rho2):
   except Exception as e:
     print(e)
     print('Solver failed')
-    quit()
+    return False
 
   success = not (problem.status == 'infeasible' or problem.status == 'unbounded')
 
@@ -232,7 +232,7 @@ class TVLQRPolicy(object):
   def get_rho(self, t):
     return self.get_item(self.rhos, t)
 
-  # Check if x is between ellipsoids
+  # TODO: check if x is between ellipsoids
   def in_roa(self, x):
     if self.rhos is None:
       print('Querying region of attraction without setting it first')
@@ -304,10 +304,11 @@ class TVPolynomialPolicy(object):
       return False
 
     # Check roa of all funnels
-    for t, V, rho, err_vars in zip(self.ts, self.Vs, self.rhos, self.errs):
+    for t, V, rho, err_vars, x0 in zip(self.ts, self.Vs, self.rhos, self.errs, self.xs):
       if V is None:
         continue
-      if V.Substitute({v: xi for v, xi in zip(err_vars, x)}).Evaluate() <= rho:
+      diff = x - x0
+      if V.Substitute({v: di for v, di in zip(err_vars, diff)}).Evaluate() <= rho:
         return True, t
 
     return False, 0
@@ -408,7 +409,7 @@ class PolynomialTree(object):
 
     # Plotting
     plt.figure()
-    plt.plot([x[0] for x in xs], [x[1] for x in xs], color='r')
+    plt.plot([x[0] for x in xs], [x[1] for x in xs], color='r', label='Trajectory')
 
     num_funnels = len(Slists)
     if num_funnels > 1:
@@ -436,6 +437,7 @@ class PolynomialTree(object):
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
     plt.title('Funnel Trace Starting at ' + str(xinit))
+    plt.legend()
     plt.savefig(fname)
     plt.show()
 
@@ -444,7 +446,11 @@ class PolynomialTree(object):
   def plot_all_funnels(self, xlabel, ylabel, fname):
     plt.figure()
     num_funnels = len(self.nodes)
-    colors = [[0, f/(num_funnels - 1), 1 - f/(num_funnels - 1)] for f in range(num_funnels)]
+    if num_funnels > 1:
+      colors = [[0, 1 - f/(num_funnels - 1), f/(num_funnels - 1)] for f in range(num_funnels)]
+    else:
+      colors = [[0, 1, 0] for f in range(num_funnels)]
+
     for color, node in zip(colors, self.nodes):
       if node.policy.infinite_horizon():
         Ss = [node.policy.S]
@@ -471,6 +477,9 @@ class PolynomialTree(object):
           points[i] += x0[i]
         plt.plot(points[0], points[1], color=color)
 
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title('Funnel Library')
     plt.savefig(fname)
     plt.show()
 
@@ -479,12 +488,6 @@ class PolynomialTree(object):
     xerr = prog.NewIndeterminates(self.nx, 'xerr')
     upolys = np.array([prog.NewFreePolynomial(Variables(xerr), 2) for i in range(self.nu)])
     u = np.array([poly.ToExpression() for poly in upolys])
-
-    Smax = np.amax(np.abs(lqr_policy.get_S(t)))
-    for poly in upolys:
-      for v in poly.decision_variables():
-        vexpr = Expression(v)
-        prog.AddLinearConstraint(vexpr, -2*Smax, 2*Smax)
 
     x0 = lqr_policy.get_x0(t)
     u0 = lqr_policy.get_u0(t)
@@ -513,6 +516,10 @@ class PolynomialTree(object):
     else:
       la = prog.NewFreePolynomial(Variables(xerr), 2).ToExpression()
 
+    # For actuator limits
+    ula_upper = [prog.NewSosPolynomial(Variables(xerr), 2)[0].ToExpression() for ui in u]
+    ula_lower = [prog.NewSosPolynomial(Variables(xerr), 2)[0].ToExpression() for ui in u]
+
     # Line search
     lower = 0
     if rhonext is None:
@@ -539,6 +546,11 @@ class PolynomialTree(object):
       prog_clone = prog.Clone()
       prog_clone.AddSosConstraint(rhodot - Vdot - la*(rho - V))
 
+      # Actuator limits
+      for ui, ulai_upper, ulai_lower, lb, ub in zip(u, ula_upper, ula_lower, self.ulb, self.uub):
+        prog_clone.AddSosConstraint(ub - ui - ulai_upper*(rho - V))
+        prog_clone.AddSosConstraint(ui - lb - ulai_lower*(rho - V))
+
       result = Solve(prog_clone)
 
       if result.is_success():
@@ -553,28 +565,34 @@ class PolynomialTree(object):
 
     if lower == 0:
       print('No region of attraction')
-      quit()
 
     rho = lower
-    print('Finished ROA line search with rho = ' + str(rho))
+    print('Finished ROA line search with rho = %f' %(rho))
 
     return rho, bestu, V, Variables(xerr)
 
-  def nearest_neighbor(self, x, R):
-    '''
+  def nearest_neighbor_euclidean(self, x):
     # Euclidean distance version
-    min_idx = 0
     min_dist = np.inf
+    min_idx = 0
+    min_t = 0
     for n, node in enumerate(self.nodes):
-      x0 = node.policy.get_x0(0)
-      dist = np.linalg.norm(x - x0)
-      if dist < min_dist:
-        min_idx = n
-        min_dist = dist
+      if node.policy.infinite_horizon():
+        policy_ts = [0]
+      else:
+        policy_ts = node.policy.ts[:-1]
 
-    return self.nodes[min_idx]
-    '''
+      for t in policy_ts:
+        x0 = node.policy.get_x0(t)
+        dist = np.linalg.norm(x - x0)
+        if dist < min_dist:
+          min_dist = dist
+          min_idx = n
+          min_t = t
 
+    return self.nodes[min_idx], min_t
+
+  def nearest_neighbor_aqr(self, x, R):
     uf = np.zeros(self.nu)
     minJ = np.inf
     min_idx = 0
@@ -628,13 +646,14 @@ class PolynomialTree(object):
     self.nodes.append(Node(PolynomialPolicy(self.xgoal, u, V, rho, err_vars, S), None, 0))
 
     max_nodes = 200
+    dircol_fails = 0
     for n in range(max_nodes):
       # Randomly sample points until we find one not in a funnel
       in_funnel = True
       max_samples = 1000
       for sample in range(max_samples):
         # Randomly sample a point
-        xsample = np.random.uniform(self.xgoal -self.xmax, self.xgoal + self.xmax)
+        xsample = np.random.uniform(self.xgoal - self.xmax, self.xgoal + self.xmax)
 
         # Check if it's in a funnel already
         in_funnel = False
@@ -647,20 +666,35 @@ class PolynomialTree(object):
           break
 
       if in_funnel:
-        print('Space has been probabilistically covered')
+        print('Space has been probabilistically covered wihth %d funnels. Direct collocation failed %d times' %(len(self.nodes), dircol_fails))
         return
 
       # Find closest node in tree to this new node using the affine quadratic regulator
-      nearest_node, t = self.nearest_neighbor(xsample, R)
+      nearest_node, t = self.nearest_neighbor_aqr(xsample, R)
       xnext = nearest_node.policy.get_x0(t)
       Snext = nearest_node.policy.get_S(t)
       rhonext = nearest_node.policy.get_rho(t)
 
-      # Run direct collocation from the new node to the found node. TODO: figure out why ellipsoid version doesn't work
       problem = DircolProblem(Q, R, self.branch_horizon, self.dt, self.dynamics, self.dynamics_deriv, self.nx, self.nu, xsample, xnext, self.ulb, self.uub)
-      #problem = EllipsoidDircolProblem(Q, R, self.branch_horizon, self.dt, self.dynamics, self.dynamics_deriv, self.nx, self.nu, xsample, xnext, self.ulb, self.uub, Snext, rhonext)
       xs, us, solved = problem.solve()
       if not solved:
+        print('Direct collocation failed. %d funnels so far' %(len(self.nodes)))
+        '''
+        print(xsample)
+        print(xnext)
+
+        nearest_node, t = self.nearest_neighbor_aqr(xsample, R)
+        xnext = nearest_node.policy.get_x0(t)
+        problem = DircolProblem(Q, R, self.branch_horizon, self.dt, self.dynamics, self.dynamics_deriv, self.nx, self.nu, xsample, xnext, self.ulb, self.uub)
+        xs, us, solved = problem.solve()
+        print(xnext)
+        print(solved)
+        print(xs)
+        print(us)
+        quit()
+        '''
+
+        dircol_fails += 1
         continue
 
       # Run TVLQR to stabilize the nominal trajectory
@@ -672,7 +706,7 @@ class PolynomialTree(object):
       lower = 0
       rho = rhonext*2
       upper = rho*2
-      rho_min = min(rhonext/10, 1e-3)
+      rho_min = min(rhonext/10, 1e-5)
       x0 = xs[-1]
       S = Ss[-1]
 
@@ -680,7 +714,7 @@ class PolynomialTree(object):
       x0next = nearest_node.policy.get_x0(t)
       i = 0
       while rho > rho_min:
-        print('Connection line search iteration ' + str(i))
+        print('Connection line search iteration %d' %(i))
         if i > max_improve and lower != 0:
           break
 
@@ -693,14 +727,11 @@ class PolynomialTree(object):
 
         i += 1
 
-      print('Finished connection line search with rho = ' + str(rho))
+      print('Finished connection line search after %d iterations with rho = %f' %(i, rho))
 
       if lower == 0:
         print('Could not contain the exit of this funnel in the entry of the next funnel')
-        print(rhonext)
-        print(Snext)
-        print(S)
-        quit()
+        continue
 
       rho = lower
 
@@ -716,13 +747,20 @@ class PolynomialTree(object):
         tnext = ts[step + 1]
         rhonext = rhos[-1]
         rho, u, V, err_vars = self.find_roa_and_controller(lqr_policy, t, False, tnext, rhonext)
+        if rho == 0:
+          break
         rhos.append(rho)
         us.append(u)
         Vs.append(V)
         errs.append(err_vars)
+
+      if rho == 0:
+        continue
 
       rhos = list(reversed(rhos))
       us = list(reversed(us))
       Vs = list(reversed(Vs))
       errs = list(reversed(errs))
       self.nodes.append(Node(TVPolynomialPolicy(xs, us, ts, Vs, rhos, errs, Ss, Sdots), nearest_node, t))
+
+    print('Created %d funnels, but did not cover space. Direct collocation failed %d times' %(len(self.nodes), dircol_fails))

@@ -33,7 +33,7 @@ def check_ellipse_containment(S1, S2, c1, c2, rho1, rho2):
   except Exception as e:
     print(e)
     print('Solver failed')
-    quit()
+    return False
 
   success = not (problem.status == 'infeasible' or problem.status == 'unbounded')
 
@@ -448,7 +448,6 @@ class LQRTree(object):
 
     if lower == 0:
       print('No region of attraction')
-      quit()
 
     rho = lower
     print('Finished ROA line search with rho = %f' %(rho))
@@ -556,16 +555,30 @@ class LQRTree(object):
 
       # Find closest node in tree to this new node using the affine quadratic regulator
       nearest_node, t = self.nearest_neighbor_aqr(xsample, R)
+      #nearest_node, t = self.nearest_neighbor_euclidean(xsample)
       xnext = nearest_node.policy.get_x0(t)
       Snext = nearest_node.policy.get_S(t)
       rhonext = nearest_node.policy.get_rho(t)
 
-      # Run direct collocation from the new node to the found node. TODO: figure out why ellipsoid version doesn't work
       problem = DircolProblem(Q, R, self.branch_horizon, self.dt, self.dynamics, self.dynamics_deriv, self.nx, self.nu, xsample, xnext, self.ulb, self.uub)
-      #problem = EllipsoidDircolProblem(Q, R, self.branch_horizon, self.dt, self.dynamics, self.dynamics_deriv, self.nx, self.nu, xsample, xnext, self.ulb, self.uub, Snext, rhonext)
       xs, us, solved = problem.solve()
       if not solved:
         print('Direct collocation failed. %d funnels so far' %(len(self.nodes)))
+        '''
+        print(xsample)
+        print(xnext)
+
+        nearest_node, t = self.nearest_neighbor_aqr(xsample, R)
+        xnext = nearest_node.policy.get_x0(t)
+        problem = DircolProblem(Q, R, self.branch_horizon, self.dt, self.dynamics, self.dynamics_deriv, self.nx, self.nu, xsample, xnext, self.ulb, self.uub)
+        xs, us, solved = problem.solve()
+        print(xnext)
+        print(solved)
+        print(xs)
+        print(us)
+        quit()
+        '''
+
         dircol_fails += 1
         continue
 
@@ -578,7 +591,7 @@ class LQRTree(object):
       lower = 0
       rho = rhonext*2
       upper = rho*2
-      rho_min = min(rhonext/10, 1e-3)
+      rho_min = min(rhonext/10, 1e-5)
       x0 = xs[-1]
       S = Ss[-1]
 
@@ -599,7 +612,7 @@ class LQRTree(object):
 
         i += 1
 
-      print('Finished connection line search with rho = %f' %(rho))
+      print('Finished connection line search after %d iterations with rho = %f' %(i, rho))
 
       if lower == 0:
         print('Could not contain the exit of this funnel in the entry of the next funnel')
