@@ -434,7 +434,7 @@ class LQRTree(object):
 
     upper = rho*2
 
-    max_improve = 8
+    max_improve = 10
     rho_min = 1e-3
     i = 0
     while rho > rho_min:
@@ -448,7 +448,10 @@ class LQRTree(object):
         rhodot = (rhonext - rho)/(tnext - t)
 
       prog_clone = prog.Clone()
-      prog_clone.AddSosConstraint(rhodot - Vdot - la*(rho - V) - 0.001*xerr@xerr)
+      if terminal:
+        prog_clone.AddSosConstraint(rhodot - Vdot - la*(rho - V) - 0.001*xerr@xerr)
+      else:
+        prog_clone.AddSosConstraint(rhodot - Vdot - la*(rho - V))
 
       result = Solve(prog_clone)
 

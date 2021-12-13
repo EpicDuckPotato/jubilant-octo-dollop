@@ -547,7 +547,7 @@ class PolynomialTree(object):
     i = 0
     bestu = None
     while rho > rho_min:
-      print('ROA line search iteration ' + str(i))
+      print('ROA line search iteration %d, testing rho = %f' %(i, rho))
       if i > max_improve and lower != 0:
         break
 
@@ -557,7 +557,11 @@ class PolynomialTree(object):
         rhodot = (rhonext - rho)/(tnext - t)
 
       prog_clone = prog.Clone()
-      prog_clone.AddSosConstraint(rhodot - Vdot - la*(rho - V))
+
+      if terminal:
+        prog_clone.AddSosConstraint(rhodot - Vdot - la*(rho - V) - 0.001*xerr@xerr)
+      else:
+        prog_clone.AddSosConstraint(rhodot - Vdot - la*(rho - V))
 
       # Actuator limits
       for ui, ulai_upper, ulai_lower, lb, ub in zip(u, ula_upper, ula_lower, self.ulb, self.uub):
@@ -657,7 +661,6 @@ class PolynomialTree(object):
       quit()
 
     self.nodes.append(Node(PolynomialPolicy(self.xgoal, u, V, rho, err_vars, S), None, 0))
-    return
 
     max_nodes = 200
     dircol_fails = 0
@@ -715,39 +718,7 @@ class PolynomialTree(object):
       ts = [step*self.dt for step in range(self.branch_horizon + 1)]
       Ss, Ks, Sdots = tvlqr(xs, us, ts, self.dynamics_deriv, Q, R, Snext)
 
-      # For the exit of this funnel, we have to find a rho such that the exit of this funnel
-      # is contained in the entry of the next funnel. Do backtracking line search
-      lower = 0
-      rho = rhonext*2
-      upper = rho*2
-      rho_min = min(rhonext/10, 1e-5)
-      x0 = xs[-1]
-      S = Ss[-1]
-
-      max_improve = 10
-      x0next = nearest_node.policy.get_x0(t)
-      i = 0
-      while rho > rho_min:
-        print('Connection line search iteration %d' %(i))
-        if i > max_improve and lower != 0:
-          break
-
-        if check_ellipse_containment(S, Snext, x0, x0next, rho, rhonext):
-          lower = rho
-          rho = (upper + rho)/2
-        else:
-          upper = rho
-          rho = (rho + lower)/2
-
-        i += 1
-
-      print('Finished connection line search after %d iterations with rho = %f' %(i, rho))
-
-      if lower == 0:
-        print('Could not contain the exit of this funnel in the entry of the next funnel')
-        continue
-
-      rho = lower
+      rho = rhonext
 
       lqr_policy = TVLQRPolicy(xs, us, ts, Ss, Ks, Sdots) 
 
