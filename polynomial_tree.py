@@ -90,9 +90,9 @@ class NSdot(object):
     NSdot = self.Q - S@B@np.linalg.solve(self.R, B.transpose())@S + S@A + A.transpose()@S
     return NSdot.flatten()
 
-def tvlqr(xs, us, ts, dynamics_deriv, Q, R):
+def tvlqr(xs, us, ts, dynamics_deriv, Q, R, Qf):
   nsdot = NSdot(ts, xs, us, Q, R, dynamics_deriv)
-  ST = Q.flatten()
+  ST = Qf.flatten()
   t0 = ts[0]
   tf = ts[-1]
   ret = solve_ivp(nsdot, (t0, tf), ST, t_eval=ts)
@@ -417,8 +417,11 @@ class PolynomialTree(object):
     else:
       colors = [[0, 1, 0] for f in range(num_funnels)]
 
-    for color, Ss, rhos, x0s in zip(colors, Slists, rholists, x0lists):
-      for S, rho, x0 in zip(Ss, rhos, x0s):
+    colors[-1] = [0, 0, 0]
+
+    for color, Ss, rhos, x0s, f in zip(colors, Slists, rholists, x0lists, list(range(num_funnels))):
+      num_pts = len(Ss)
+      for S, rho, x0, p in zip(Ss, rhos, x0s, list(range(num_pts))):
         # Project S to 2D using Schur complement
         J = S[:2, :2]
         L = S[2:, :2]
@@ -432,7 +435,11 @@ class PolynomialTree(object):
 
         for i in range(2):
           points[i] += x0[i]
-        plt.plot(points[0], points[1], color=color)
+
+        if f == num_funnels - 1 and p == num_pts - 1:
+          plt.plot(points[0], points[1], color=color, linewidth=6, label='LTI Controller')
+        else:
+          plt.plot(points[0], points[1], color=color)
 
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
@@ -450,6 +457,8 @@ class PolynomialTree(object):
       colors = [[0, 1 - f/(num_funnels - 1), f/(num_funnels - 1)] for f in range(num_funnels)]
     else:
       colors = [[0, 1, 0] for f in range(num_funnels)]
+
+    colors[0] = [0, 0, 0]
 
     for color, node in zip(colors, self.nodes):
       if node.policy.infinite_horizon():
@@ -475,7 +484,11 @@ class PolynomialTree(object):
 
         for i in range(2):
           points[i] += x0[i]
-        plt.plot(points[0], points[1], color=color)
+
+        if node.policy.infinite_horizon():
+          plt.plot(points[0], points[1], color=color, label='LTI Controller')
+        else:
+          plt.plot(points[0], points[1], color=color)
 
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
@@ -644,6 +657,7 @@ class PolynomialTree(object):
       quit()
 
     self.nodes.append(Node(PolynomialPolicy(self.xgoal, u, V, rho, err_vars, S), None, 0))
+    return
 
     max_nodes = 200
     dircol_fails = 0
@@ -699,7 +713,7 @@ class PolynomialTree(object):
 
       # Run TVLQR to stabilize the nominal trajectory
       ts = [step*self.dt for step in range(self.branch_horizon + 1)]
-      Ss, Ks, Sdots = tvlqr(xs, us, ts, self.dynamics_deriv, Q, R)
+      Ss, Ks, Sdots = tvlqr(xs, us, ts, self.dynamics_deriv, Q, R, Snext)
 
       # For the exit of this funnel, we have to find a rho such that the exit of this funnel
       # is contained in the entry of the next funnel. Do backtracking line search

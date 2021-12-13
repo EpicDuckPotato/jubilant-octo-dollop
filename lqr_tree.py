@@ -92,9 +92,9 @@ class NSdot(object):
     NSdot = self.Q - S@B@np.linalg.solve(self.R, B.transpose())@S + S@A + A.transpose()@S
     return NSdot.flatten()
 
-def tvlqr(xs, us, ts, dynamics_deriv, Q, R):
+def tvlqr(xs, us, ts, dynamics_deriv, Q, R, Qf):
   nsdot = NSdot(ts, xs, us, Q, R, dynamics_deriv)
-  ST = Q.flatten()
+  ST = Qf.flatten()
   t0 = ts[0]
   tf = ts[-1]
   ret = solve_ivp(nsdot, (t0, tf), ST, t_eval=ts)
@@ -315,8 +315,11 @@ class LQRTree(object):
     else:
       colors = [[0, 1, 0] for f in range(num_funnels)]
 
-    for color, Ss, rhos, x0s in zip(colors, Slists, rholists, x0lists):
-      for S, rho, x0 in zip(Ss, rhos, x0s):
+    colors[-1] = [0, 0, 0]
+
+    for color, Ss, rhos, x0s, f in zip(colors, Slists, rholists, x0lists, list(range(num_funnels))):
+      num_pts = len(Ss)
+      for S, rho, x0, p in zip(Ss, rhos, x0s, list(range(num_pts))):
         # Project S to 2D using Schur complement
         J = S[:2, :2]
         L = S[2:, :2]
@@ -330,7 +333,11 @@ class LQRTree(object):
 
         for i in range(2):
           points[i] += x0[i]
-        plt.plot(points[0], points[1], color=color)
+
+        if f == num_funnels - 1 and p == num_pts - 1:
+          plt.plot(points[0], points[1], color=color, linewidth=6, label='LTI Controller')
+        else:
+          plt.plot(points[0], points[1], color=color)
 
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
@@ -348,6 +355,9 @@ class LQRTree(object):
       colors = [[0, 1 - f/(num_funnels - 1), f/(num_funnels - 1)] for f in range(num_funnels)]
     else:
       colors = [[0, 1, 0] for f in range(num_funnels)]
+
+    colors[0] = [0, 0, 0]
+
     for color, node in zip(colors, self.nodes):
       if node.policy.infinite_horizon():
         Ss = [node.policy.S]
@@ -372,11 +382,16 @@ class LQRTree(object):
 
         for i in range(2):
           points[i] += x0[i]
-        plt.plot(points[0], points[1], color=color)
+         
+        if node.policy.infinite_horizon():
+          plt.plot(points[0], points[1], color=color, label='LTI Controller', linewidth=6)
+        else:
+          plt.plot(points[0], points[1], color=color)
 
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
     plt.title('Funnel Library')
+    plt.legend()
     plt.savefig(fname)
     plt.show()
 
@@ -419,7 +434,7 @@ class LQRTree(object):
 
     upper = rho*2
 
-    max_improve = 10
+    max_improve = 8
     rho_min = 1e-3
     i = 0
     while rho > rho_min:
@@ -433,7 +448,7 @@ class LQRTree(object):
         rhodot = (rhonext - rho)/(tnext - t)
 
       prog_clone = prog.Clone()
-      prog_clone.AddSosConstraint(rhodot - Vdot - la*(rho - V))
+      prog_clone.AddSosConstraint(rhodot - Vdot - la*(rho - V) - 0.001*xerr@xerr)
 
       result = Solve(prog_clone)
 
@@ -550,7 +565,7 @@ class LQRTree(object):
           break
 
       if in_funnel:
-        print('Space has been probabilistically covered wihth %d funnels. Direct collocation failed %d times' %(len(self.nodes), dircol_fails))
+        print('Space has been probabilistically covered with %d funnels. Direct collocation failed %d times' %(len(self.nodes), dircol_fails))
         return
 
       # Find closest node in tree to this new node using the affine quadratic regulator
@@ -584,43 +599,11 @@ class LQRTree(object):
 
       # Run TVLQR to stabilize the nominal trajectory
       ts = [step*self.dt for step in range(self.branch_horizon + 1)]
-      Ss, Ks, Sdots = tvlqr(xs, us, ts, self.dynamics_deriv, Q, R)
-
-      # For the exit of this funnel, we have to find a rho such that the exit of this funnel
-      # is contained in the entry of the next funnel. Do backtracking line search
-      lower = 0
-      rho = rhonext*2
-      upper = rho*2
-      rho_min = min(rhonext/10, 1e-5)
-      x0 = xs[-1]
-      S = Ss[-1]
-
-      max_improve = 10
-      x0next = nearest_node.policy.get_x0(t)
-      i = 0
-      while rho > rho_min:
-        print('Connection line search iteration %d' %(i))
-        if i > max_improve and lower != 0:
-          break
-
-        if check_ellipse_containment(S, Snext, x0, x0next, rho, rhonext):
-          lower = rho
-          rho = (upper + rho)/2
-        else:
-          upper = rho
-          rho = (rho + lower)/2
-
-        i += 1
-
-      print('Finished connection line search after %d iterations with rho = %f' %(i, rho))
-
-      if lower == 0:
-        print('Could not contain the exit of this funnel in the entry of the next funnel')
-        continue
+      Ss, Ks, Sdots = tvlqr(xs, us, ts, self.dynamics_deriv, Q, R, Snext)
 
       lqr_policy = TVLQRPolicy(xs, us, ts, Ss, Ks, Sdots)
 
-      rho = lower
+      rho = rhonext
 
       # Run SOS optimization to get the funnel size at each time step
       rhos = [rho]
